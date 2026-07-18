@@ -81,18 +81,8 @@ jobs:
           [ "$PR_ACTION" = "synchronize" ] && ACTION_LABEL="updated"
           [ "$PR_ACTION" = "reopened"    ] && ACTION_LABEL="reopened"
 
-          # Use python3 for safe JSON body generation (no heredoc quoting issues)
-          BODY=$(python3 -c "
-import json, os
-body = (
-    f'PR {os.environ[\"ACTION_LABEL\"]} by @{os.environ[\"PR_AUTHOR\"]}\n\n'
-    f'PR: {os.environ[\"PR_TITLE\"]}\n'
-    f'Link: {os.environ[\"PR_URL\"]}\n\n'
-    f'CI pipeline: {os.environ[\"RUN_URL\"]}\n'
-    f'Branch: {os.environ[\"HEAD_REF\"]} -> {os.environ[\"BASE_REF\"]}'
-)
-print(json.dumps({'body': body}))
-" ACTION_LABEL="$ACTION_LABEL")
+          MSG="PR ${ACTION_LABEL} by @${PR_AUTHOR}\n\nPR: ${PR_TITLE}\nLink: ${PR_URL}\n\nCI: ${RUN_URL}\nBranch: ${HEAD_REF} -> ${BASE_REF}"
+          BODY=$(python3 -c "import json,sys; sys.stdout.write(json.dumps({'body': sys.argv[1]})+'\n')" "$MSG")
 
           curl --silent --fail \
             -X POST \
@@ -128,19 +118,8 @@ print(json.dumps({'body': body}))
           BASE_REF: ${{ github.base_ref }}
         run: |
           SHORT_SHA="${MERGE_SHA:0:7}"
-          COMMITS_URL="${{ github.server_url }}/${{ github.repository }}/commit/$MERGE_SHA"
-
-          BODY=$(python3 -c "
-import json, os
-body = (
-    f'PR merged by @{os.environ[\"MERGED_BY\"]}\n\n'
-    f'PR: {os.environ[\"PR_TITLE\"]}\n'
-    f'Link: {os.environ[\"PR_URL\"]}\n\n'
-    f'Merge commit: {os.environ[\"SHORT_SHA\"]}\n'
-    f'Target branch: {os.environ[\"BASE_REF\"]}'
-)
-print(json.dumps({'body': body}))
-" SHORT_SHA="$SHORT_SHA" COMMITS_URL="$COMMITS_URL")
+          MSG="PR merged by @${MERGED_BY}\n\nPR: ${PR_TITLE}\nLink: ${PR_URL}\n\nMerge commit: ${SHORT_SHA}\nTarget branch: ${BASE_REF}"
+          BODY=$(python3 -c "import json,sys; sys.stdout.write(json.dumps({'body': sys.argv[1]})+'\n')" "$MSG")
 
           curl --silent --fail \
             -X POST \
@@ -166,30 +145,18 @@ print(json.dumps({'body': body}))
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
-          PR_DATA=$(curl -s \
+          PR_JSON=$(curl -s \
             -H "Authorization: token $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/pull_requests" \
-            | python3 -c "
-import json,sys
-data=json.load(sys.stdin)
-if data:
-    pr=data[0]
-    print(f'title={pr[\"title\"]}')
-    print(f'url={pr[\"html_url\"]}')
-else:
-    print('title=')
-    print('url=')
-")
-
-          PR_TITLE=$(echo "$PR_DATA" | grep '^title=' | cut -d= -f2-)
-          PR_URL=$(echo "$PR_DATA" | grep '^url='   | cut -d= -f2-)
+            "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/pull_requests")
+          PR_TITLE=$(echo "$PR_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['title'] if d else '')")
+          PR_URL=$(echo "$PR_JSON"   | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['html_url'] if d else '')")
           TICKET=$(echo "$PR_TITLE" | grep -oiE 'BIA-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
 
-          echo "ticket=$TICKET"   >> "$GITHUB_OUTPUT"
+          echo "ticket=$TICKET"     >> "$GITHUB_OUTPUT"
           echo "pr_title=$PR_TITLE" >> "$GITHUB_OUTPUT"
-          echo "pr_url=$PR_URL"   >> "$GITHUB_OUTPUT"
-          echo "has_ticket=$([ -n '$TICKET' ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "pr_url=$PR_URL"     >> "$GITHUB_OUTPUT"
+          [ -n "$TICKET" ] && echo "has_ticket=true" >> "$GITHUB_OUTPUT" || echo "has_ticket=false" >> "$GITHUB_OUTPUT"
 
       - name: Post CI pass comment
         if: |
@@ -203,20 +170,8 @@ else:
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           PR_URL: ${{ steps.pr_info.outputs.pr_url }}
         run: |
-          BODY=$(python3 -c "
-import json, os
-body = (
-    'CI PASSED - all checks green\n\n'
-    f'Pipeline: {os.environ[\"RUN_URL\"]}\n'
-    f'PR: {os.environ[\"PR_URL\"]}\n\n'
-    'Jobs:\n'
-    '  Backend pytest:        PASS\n'
-    '  Frontend lint + build: PASS\n'
-    '  Java Maven build:      PASS\n'
-    '  E2E smoke + holds:     PASS'
-)
-print(json.dumps({'body': body}))
-")
+          MSG="CI PASSED - all checks green\n\nPipeline: ${RUN_URL}\nPR: ${PR_URL}\n\nJobs:\n  Backend pytest:        PASS\n  Frontend lint + build: PASS\n  Java Maven build:      PASS\n  E2E smoke + holds:     PASS"
+          BODY=$(python3 -c "import json,sys; sys.stdout.write(json.dumps({'body': sys.argv[1]})+'\n')" "$MSG")
           curl --silent --fail \
             -X POST \
             -H "Content-Type: application/json" \
@@ -237,17 +192,8 @@ print(json.dumps({'body': body}))
           PR_URL: ${{ steps.pr_info.outputs.pr_url }}
           ACTOR: ${{ github.event.workflow_run.actor.login }}
         run: |
-          BODY=$(python3 -c "
-import json, os
-body = (
-    'CI FAILED - review required\n\n'
-    f'Failed run: {os.environ[\"RUN_URL\"]}\n'
-    f'PR: {os.environ[\"PR_URL\"]}\n'
-    f'Triggered by: @{os.environ[\"ACTOR\"]}\n\n'
-    'Check the run logs and push a fix to unblock the PR.'
-)
-print(json.dumps({'body': body}))
-")
+          MSG="CI FAILED - review required\n\nFailed run: ${RUN_URL}\nPR: ${PR_URL}\nTriggered by: @${ACTOR}\n\nCheck the run logs and push a fix to unblock the PR."
+          BODY=$(python3 -c "import json,sys; sys.stdout.write(json.dumps({'body': sys.argv[1]})+'\n')" "$MSG")
           curl --silent --fail \
             -X POST \
             -H "Content-Type: application/json" \
