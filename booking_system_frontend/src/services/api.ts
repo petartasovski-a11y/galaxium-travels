@@ -208,7 +208,12 @@ export const releaseHold = async (holdId: string): Promise<Hold> => {
 export const isErrorResponse = (
   response: unknown
 ): response is ErrorResponse => {
-  return response && response.success === false;
+  return (
+    typeof response === 'object' &&
+    response !== null &&
+    'success' in response &&
+    (response as Record<string, unknown>).success === false
+  );
 };
 
 /**
