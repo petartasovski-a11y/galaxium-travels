@@ -81,7 +81,7 @@ export const MyBookings = () => {
       setBookings(bookingsData);
       setFlights(flightsData);
       await loadHolds();
-    } catch (error: any) {
+    } catch (error: unknown) {
       toast.error('Failed to load bookings');
       console.error(error);
     } finally {
@@ -110,8 +110,9 @@ export const MyBookings = () => {
 
       toast.success('Booking cancelled successfully');
       loadData();
-    } catch (error: any) {
-      toast.error(error.details || error.error || 'Failed to cancel booking');
+    } catch (error: unknown) {
+      const e = error as { details?: string; error?: string };
+      toast.error(e.details || e.error || 'Failed to cancel booking');
     } finally {
       setCancellingId(null);
       setBookingToCancel(null);

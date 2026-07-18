@@ -35,7 +35,7 @@ export const Flights = () => {
     try {
       const data = await getFlights(filters);
       setFlights(data);
-    } catch (error: any) {
+    } catch (error: unknown) {
       if (retryCount < MAX_RETRIES) {
         toast.error(`Failed to load flights. Retrying... (${retryCount + 1}/${MAX_RETRIES})`);
         console.warn(`Retry attempt ${retryCount + 1} after error:`, error);

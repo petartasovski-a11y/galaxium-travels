@@ -12,7 +12,7 @@ interface FlightFiltersProps {
 export const FlightFilters = ({ filters, onFiltersChange, onReset }: FlightFiltersProps) => {
   const [isExpanded, setIsExpanded] = useState(false);
 
-  const updateFilter = (key: keyof FlightFiltersType, value: any) => {
+  const updateFilter = (key: keyof FlightFiltersType, value: string | boolean | number | undefined) => {
     onFiltersChange({ ...filters, [key]: value });
   };
 

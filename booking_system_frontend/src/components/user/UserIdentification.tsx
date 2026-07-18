@@ -68,8 +68,9 @@ export const UserIdentification = ({ isOpen, onClose, onSuccess }: UserIdentific
         onSuccess();
         onClose();
       }
-    } catch (error: any) {
-      toast.error(error.details || error.error || 'An error occurred');
+    } catch (error: unknown) {
+      const e = error as { details?: string; error?: string };
+      toast.error(e.details || e.error || 'An error occurred');
     } finally {
       setIsLoading(false);
     }
