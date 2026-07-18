@@ -2,6 +2,7 @@ import type { Flight, SeatClass } from '../../types';
 import { Card, Button } from '../common';
 import { Plane, Clock, Users, Crown, Rocket } from 'lucide-react';
 import { formatCurrency, formatDate, formatTime, calculateDuration } from '../../utils/formatters';
+import { getFlightStatus } from '../../utils/flightStatus';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { getDestinationByName } from '../../data/destinations';
@@ -83,6 +84,15 @@ export const FlightCard = ({ flight, onBook }: FlightCardProps) => {
               </p>
             </div>
           </div>
+          {/* Flight status chip — BIA-27 */}
+          {(() => {
+            const status = getFlightStatus(flight.departure_time, flight.arrival_time);
+            return (
+              <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${status.color} ${status.textColor}`}>
+                {status.label}
+              </span>
+            );
+          })()}
         </div>
 
         {/* Flight Details */}
