@@ -1,0 +1,64 @@
+name: Jira PR Title Check
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Enforces that every PR targeting main includes a BIA-NNN ticket reference
+# in its title, so the Jira integration has a ticket to post to.
+#
+# Examples of valid PR titles:
+#   feat: BIA-23 confirm hold lifecycle
+#   fix(backend): BIA-33 name-mismatch information disclosure
+#   BIA-21 flight search page and booking modal
+#   chore: bump deps [BIA-31]
+#
+# The check is advisory — it posts a warning but does NOT block the PR merge.
+# Change `conclusion` to `failure` below if you want it to be a hard gate.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  check-ticket:
+    name: PR title includes Jira ticket
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check for BIA-NNN in PR title
+        id: check
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          TICKET=$(echo "$PR_TITLE" | grep -oiE 'BIA-[0-9]+' | head -1)
+          if [ -n "$TICKET" ]; then
+            echo "✅ Found ticket: $TICKET in PR #$PR_NUMBER — \"$PR_TITLE\""
+            echo "found=true"  >> "$GITHUB_OUTPUT"
+            echo "ticket=$(echo $TICKET | tr '[:lower:]' '[:upper:]')" >> "$GITHUB_OUTPUT"
+          else
+            echo "⚠️  No Jira ticket key found in PR #$PR_NUMBER — \"$PR_TITLE\""
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Warn if ticket missing
+        if: steps.check.outputs.found == 'false'
+        run: |
+          cat <<'EOF'
+          ─────────────────────────────────────────────────────────────────
+          ⚠️  PR TITLE MISSING JIRA TICKET REFERENCE
+          ─────────────────────────────────────────────────────────────────
+          The Jira ↔ GitHub integration posts CI status to the linked
+          ticket automatically — but only when a BIA-NNN key is present
+          in the PR title.
+
+          Please update your PR title to include the ticket, e.g.:
+            feat: BIA-23 confirm hold lifecycle
+            fix(backend): BIA-33 name-mismatch information disclosure
+
+          The PR will still be mergeable, but no Jira comments will be
+          posted until the title is updated.
+          ─────────────────────────────────────────────────────────────────
+          EOF
+          # Exit 0 — advisory only. Change to `exit 1` to make this a hard gate.
+          exit 0

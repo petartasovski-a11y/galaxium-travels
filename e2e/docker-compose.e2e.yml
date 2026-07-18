@@ -1,0 +1,45 @@
+# Self-contained stack for end-to-end tests.
+# Isolated from your dev stack: dedicated ports (18001/18082), ephemeral DBs,
+# and a deliberately short hold duration so the auto-expiry path is testable.
+#
+# Deliberately leaner than the prod docker-compose.yml: no Postgres. The backend
+# defaults to SQLite when DATABASE_URL is unset, which is plenty for the tests and
+# keeps the whole stack to two locally-built images. Swap SQLite for Postgres here
+# if you ever want to test that path too.
+#
+# Unlike the prod compose, this stack builds *native* images (no platform pin) so
+# it doesn't pay the QEMU amd64 emulation tax on Apple Silicon — the slow part was
+# emulating both the Maven build and Spring Boot startup. The only amd64-only base
+# image was the Java alpine JRE, so we override it (RUNTIME_IMAGE below) with a
+# multi-arch JRE for this build only; prod's Dockerfile default is untouched.
+#
+# Brought up/down automatically by conftest.py. Run manually with:
+#   docker compose -p galaxium_e2e -f e2e/docker-compose.e2e.yml up -d --build
+services:
+  backend:
+    build: ../booking_system_backend
+    ports:
+      - "18001:8080"
+    environment:
+      # No DATABASE_URL -> db.py falls back to SQLite (ephemeral, re-seeded on boot).
+      CORS_ORIGINS: http://localhost:5173
+      JAVA_SERVICE_URL: http://java-service:8080
+      SEED_DEMO_DATA: "true"
+
+  java-service:
+    build:
+      context: ../booking_system_inventory_hold_service
+      args:
+        # Multi-arch JRE (glibc) so this builds/runs native instead of emulated.
+        # Prod keeps the alpine default baked into the Dockerfile.
+        RUNTIME_IMAGE: eclipse-temurin:17-jre
+    ports:
+      - "18082:8080"
+    environment:
+      PYTHON_BACKEND_URL: http://backend:8080
+      SPRING_DATASOURCE_URL: jdbc:sqlite:/app/data/holds.db
+      # Short timers so test_holds::test_hold_auto_expiry doesn't wait 15 min.
+      HOLD_DURATION_MINUTES: "1"
+      HOLD_EXPIRATION_CHECK_INTERVAL_SECONDS: "5"
+    depends_on:
+      - backend

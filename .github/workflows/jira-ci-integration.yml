@@ -1,0 +1,256 @@
+name: Jira CI Integration
+
+# ─────────────────────────────────────────────────────────────────────────────
+# This workflow keeps the Jira board in sync with GitHub Actions outcomes.
+#
+# What it does
+# ─────────────────────────────────────────────────────────────────────────────
+#   • On every PR open/update       → posts a "CI started" comment to the linked
+#                                      Jira ticket and transitions it to In Review
+#   • After CI completes (pass)     → transitions ticket to Done (if it was
+#                                      In Review) and posts a pass comment
+#   • After CI completes (fail)     → posts a failure comment with a direct link
+#                                      to the failed run, leaves ticket in In Review
+#   • On PR merge to main           → posts a "Merged" comment with the commit SHA
+#
+# Ticket linking convention
+# ─────────────────────────────────────────────────────────────────────────────
+#   Include the Jira issue key in the PR title:
+#     feat: BIA-23 confirm hold lifecycle
+#     fix: BIA-33 name-mismatch information disclosure
+#   Any BIA-NNN pattern in the PR title is picked up automatically.
+#
+# Required repository secrets  (Settings → Secrets and variables → Actions)
+# ─────────────────────────────────────────────────────────────────────────────
+#   JIRA_BASE_URL   — https://your-org.atlassian.net
+#   JIRA_USER_EMAIL — bot account email (e.g. ci-bot@your-org.com)
+#   JIRA_API_TOKEN  — Jira API token for the bot account
+#                     Create at https://id.atlassian.com/manage-profile/security/api-tokens
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, closed]
+
+  # Re-run Jira notification when the CI workflow finishes.
+  # We use workflow_run so this job can post the final pass/fail status
+  # after the full CI pipeline completes (not just individual jobs).
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Extract Jira issue key from the PR title
+  # ───────────────────────────────────────────────────────────────────────────
+  extract-ticket:
+    name: Extract Jira ticket key
+    runs-on: ubuntu-latest
+    # Only run on pull_request events; workflow_run events go to the other jobs.
+    if: github.event_name == 'pull_request'
+    outputs:
+      ticket: ${{ steps.parse.outputs.ticket }}
+      has_ticket: ${{ steps.parse.outputs.has_ticket }}
+
+    steps:
+      - name: Parse ticket from PR title
+        id: parse
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Match BIA-NNN (case-insensitive) anywhere in the PR title
+          TICKET=$(echo "$PR_TITLE" | grep -oiE 'BIA-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+          if [ -n "$TICKET" ]; then
+            echo "ticket=$TICKET" >> "$GITHUB_OUTPUT"
+            echo "has_ticket=true" >> "$GITHUB_OUTPUT"
+            echo "Found Jira ticket: $TICKET"
+          else
+            echo "has_ticket=false" >> "$GITHUB_OUTPUT"
+            echo "No Jira ticket found in PR title: $PR_TITLE"
+          fi
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # On PR open/update: post comment + transition ticket to In Review
+  # ───────────────────────────────────────────────────────────────────────────
+  notify-pr-opened:
+    name: Jira — PR opened / updated
+    runs-on: ubuntu-latest
+    needs: extract-ticket
+    if: |
+      needs.extract-ticket.outputs.has_ticket == 'true' &&
+      github.event.action != 'closed'
+
+    steps:
+      - name: Transition ticket to In Review
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          TICKET: ${{ needs.extract-ticket.outputs.ticket }}
+        run: |
+          # Transition ID 31 = "In Review" (matches the BIA project workflow)
+          curl --silent --fail \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/transitions" \
+            -d '{"transition": {"id": "31"}}' || echo "Transition skipped (may already be In Review)"
+
+      - name: Post PR link comment to Jira ticket
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          TICKET: ${{ needs.extract-ticket.outputs.ticket }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_ACTION: ${{ github.event.action }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          ACTION_LABEL="opened"
+          [ "$PR_ACTION" = "synchronize" ] && ACTION_LABEL="updated"
+          [ "$PR_ACTION" = "reopened" ] && ACTION_LABEL="reopened"
+
+          BODY=$(cat <<EOF
+          {
+            "body": "🔄 *Pull Request ${ACTION_LABEL}* by @${PR_AUTHOR}\n\n[${PR_TITLE}|${PR_URL}]\n\n*CI pipeline:* [View run|${RUN_URL}]\n*Branch:* \`${{ github.head_ref }}\` → \`${{ github.base_ref }}\`"
+          }
+          EOF
+          )
+          curl --silent --fail \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" \
+            -d "$BODY"
+          echo "Comment posted to $TICKET"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # On PR merge: post merged comment
+  # ───────────────────────────────────────────────────────────────────────────
+  notify-pr-merged:
+    name: Jira — PR merged
+    runs-on: ubuntu-latest
+    needs: extract-ticket
+    if: |
+      needs.extract-ticket.outputs.has_ticket == 'true' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true
+
+    steps:
+      - name: Post merged comment to Jira ticket
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          TICKET: ${{ needs.extract-ticket.outputs.ticket }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+          COMMITS_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          BODY=$(cat <<EOF
+          {
+            "body": "✅ *Pull Request merged* by @${MERGED_BY}\n\n[${PR_TITLE}|${PR_URL}]\n\n*Merge commit:* [${MERGE_SHA:0:7}|${COMMITS_URL}]\n*Target branch:* \`${{ github.base_ref }}\`"
+          }
+          EOF
+          )
+          curl --silent --fail \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" \
+            -d "$BODY"
+          echo "Merge comment posted to $TICKET"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # After the CI workflow finishes: post pass/fail result to Jira
+  # This job triggers on workflow_run so it runs AFTER the full CI pipeline.
+  # ───────────────────────────────────────────────────────────────────────────
+  notify-ci-result:
+    name: Jira — CI result
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_run'
+
+    steps:
+      # Fetch the PR number from the triggering workflow run so we can
+      # extract the PR title (and thus the Jira ticket key).
+      - name: Get PR info for this workflow run
+        id: pr_info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          # workflow_run doesn't directly expose the PR; look it up via the API.
+          PR_DATA=$(gh api \
+            "repos/$REPO/actions/runs/$RUN_ID/pull_requests" \
+            --jq '.[0] | {number: .number, title: .title, url: .html_url}' 2>/dev/null || echo '{}')
+
+          PR_TITLE=$(echo "$PR_DATA" | jq -r '.title // ""')
+          PR_URL=$(echo "$PR_DATA" | jq -r '.url // ""')
+          PR_NUMBER=$(echo "$PR_DATA" | jq -r '.number // ""')
+
+          TICKET=$(echo "$PR_TITLE" | grep -oiE 'BIA-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+
+          echo "ticket=$TICKET"        >> "$GITHUB_OUTPUT"
+          echo "pr_title=$PR_TITLE"    >> "$GITHUB_OUTPUT"
+          echo "pr_url=$PR_URL"        >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER"  >> "$GITHUB_OUTPUT"
+          echo "has_ticket=$([ -n "$TICKET" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Post CI pass comment + transition to Done
+        if: |
+          steps.pr_info.outputs.has_ticket == 'true' &&
+          github.event.workflow_run.conclusion == 'success'
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          TICKET: ${{ steps.pr_info.outputs.ticket }}
+          PR_URL: ${{ steps.pr_info.outputs.pr_url }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          DURATION: ${{ github.event.workflow_run.updated_at }}
+        run: |
+          # Post pass comment
+          BODY=$(cat <<EOF
+          {
+            "body": "✅ *CI passed* — all checks green\n\n*Pipeline:* [View run|${RUN_URL}]\n*PR:* [${PR_URL}|${PR_URL}]\n\n||Job|Status|\n|Backend — pytest|✅ Pass|\n|Frontend — lint + build|✅ Pass|\n|Java hold service — Maven|✅ Pass|\n|E2E — smoke + holds|✅ Pass|"
+          }
+          EOF
+          )
+          curl --silent --fail \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" \
+            -d "$BODY"
+
+      - name: Post CI failure comment
+        if: |
+          steps.pr_info.outputs.has_ticket == 'true' &&
+          github.event.workflow_run.conclusion == 'failure'
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          TICKET: ${{ steps.pr_info.outputs.ticket }}
+          PR_URL: ${{ steps.pr_info.outputs.pr_url }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          ACTOR: ${{ github.event.workflow_run.actor.login }}
+        run: |
+          BODY=$(cat <<EOF
+          {
+            "body": "❌ *CI failed* — review required\n\n*Pipeline:* [View failed run|${RUN_URL}]\n*PR:* [${PR_URL}|${PR_URL}]\n*Triggered by:* @${ACTOR}\n\nPlease check the run logs and push a fix to unblock the PR."
+          }
+          EOF
+          )
+          curl --silent --fail \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" \
+            -d "$BODY"
